@@ -8,7 +8,9 @@ from aiogram import Bot, Dispatcher, html
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
+from middleware import AuthMiddleware, ThrottlingMiddleware, is_admin
+from admin import show_admin_menu, handle_admin_panel_callback
 
 # Load environment variables from .env file
 load_dotenv()
@@ -19,17 +21,32 @@ TOKEN = getenv("BOT_TOKEN")
 # All handlers should be attached to the Router (or Dispatcher)
 dp = Dispatcher()
 
+# Регистрируем middleware
+# ThrottlingMiddleware должен быть первым, чтобы ограничивать все запросы
+dp.message.middleware(ThrottlingMiddleware(rate_limit=1.0))
+dp.callback_query.middleware(ThrottlingMiddleware(rate_limit=1.0))
+dp.message.middleware(AuthMiddleware())
+
 
 @dp.message(CommandStart())
 async def command_start_handler(message: Message) -> None:
     """
     This handler receives messages with `/start` command
+    Проверяет, является ли пользователь админом, и показывает админ меню если да.
     """
-    await message.answer(
-        f"Hello, {html.bold(message.from_user.full_name)}!\n\n"
-        f"Это базовый скелет Telegram бота на aiogram 3.24.0.\n"
-        f"Используйте /help для просмотра доступных команд."
-    )
+    if not message.from_user:
+        return
+    
+    # Проверяем, является ли пользователь админом
+    if is_admin(message.from_user.id):
+        # Показываем админ меню
+        await show_admin_menu(message)
+    else:
+        await message.answer(
+            f"Hello, {html.bold(message.from_user.full_name)}!\n\n"
+            f"Это базовый скелет Telegram бота на aiogram 3.24.0.\n"
+            f"Используйте /help для просмотра доступных команд."
+        )
 
 
 @dp.message(Command("help"))
@@ -44,6 +61,14 @@ async def command_help_handler(message: Message) -> None:
         f"Вы можете отправлять любые сообщения боту, и он будет их повторять."
     )
     await message.answer(help_text)
+
+
+@dp.callback_query(lambda c: c.data == "admin_panel")
+async def admin_panel_callback_handler(callback: CallbackQuery) -> None:
+    """
+    Обработчик нажатия на кнопку "Админ панель"
+    """
+    await handle_admin_panel_callback(callback)
 
 
 @dp.message()
@@ -66,27 +91,7 @@ async def main() -> None:
     bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
     try:
-        # Check webhook status and delete if exists
-        webhook_info = await bot.get_webhook_info()
-        if webhook_info.url:
-            logging.info(f"Обнаружен активный webhook: {webhook_info.url}")
-            result = await bot.delete_webhook(drop_pending_updates=True)
-            logging.info(f"Webhook удален: {result}")
-            # Wait a bit to ensure Telegram processes the deletion
-            await asyncio.sleep(2)
-            
-            # Verify webhook is deleted
-            webhook_info = await bot.get_webhook_info()
-            if webhook_info.url:
-                logging.warning(f"Webhook все еще активен: {webhook_info.url}. Повторная попытка удаления...")
-                await bot.delete_webhook(drop_pending_updates=True)
-                await asyncio.sleep(2)
-            else:
-                logging.info("Webhook успешно удален, подтверждено")
-        else:
-            logging.info("Webhook не обнаружен, можно использовать polling")
-        
-        # And the run events dispatching
+        # Run events dispatching with polling
         await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
         logging.error(f"Ошибка при запуске бота: {e}")
